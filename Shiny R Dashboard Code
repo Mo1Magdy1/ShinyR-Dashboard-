@@ -1,0 +1,218 @@
+# ---- libraries ----
+library(shiny)
+library(shinydashboard)
+library(survival)
+library(DT)
+library(flexdashboard)
+library(survminer)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(ggforce)
+library(scales)
+
+# ---- Read data ----
+# Make sure the path to your CSV is correct
+# For this example, we'll create a dummy dataframe if the file doesn't exist.
+tryCatch({
+  data <- read.csv("C:/Users/alreada/Desktop/El futuro/DATASETs/cancer_survival.csv")
+}, error = function(e) {
+  print("CSV file not found. Creating a sample dataframe for demonstration.")
+  data <- data.frame(
+    time = sample(10:1000, 400, replace = TRUE),
+    status = sample(1:2, 400, replace = TRUE),
+    intervention = sample(c("Standard_Care", "Drug"), 400, replace = TRUE),
+    age = sample(25:80, 400, replace = TRUE),
+    sex = sample(1:2, 400, replace = TRUE)
+  )
+})
+
+
+# ---- Data Pre-processing ----
+# Clean up missing critical fields
+data <- data %>% filter(!is.na(time), !is.na(status), !is.na(intervention), !is.na(age), !is.na(sex))
+
+# Adjust status: In survival analysis, 1 is typically event (death) and 0 is censored (alive).
+# Your original code: 1 = alive, 2 = deceased. New code: 0 = alive, 1 = deceased.
+data$status_new <- ifelse(data$status == 2, 1, 0)
+
+# Ensure 'intervention' is a factor
+data$intervention <- factor(data$intervention)
+
+
+# ---- UI ----
+ui <- dashboardPage(
+  skin = "blue",
+  dashboardHeader(
+    title = "Cancer Survival Dashboard",
+    dropdownMenu(type = "notifications",
+                 notificationItem(
+                   text = "New patient data loaded!",
+                   icon = icon("user-plus"),
+                   status = "success"
+                 )
+    )
+  ),
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("Dashboard", tabName = "dashboard", icon = icon("dashboard")),
+      menuItem("Patients Data", tabName = "patients", icon = icon("users")),
+      sliderInput("ageRange", "Filter by Age:",
+                  min = min(data$age), max = max(data$age),
+                  value = c(min(data$age), max(data$age))),
+      checkboxGroupInput("genderFilter", "Filter by Gender:",
+                         choices = list("Male" = 1, "Female" = 2),
+                         selected = c(1, 2))
+    )
+  ),
+  dashboardBody(
+    tabItems(
+      tabItem(tabName = "dashboard",
+              fluidRow(
+                box(
+                  width = 4, status = "info",
+                  title = "Patients Enrolled",
+                  gaugeOutput("patientGauge", height = "200px")
+                ),
+                box(
+                  width = 4, status = "primary",
+                  title = "Gender Distribution",
+                  plotOutput("genderPlot", height = "200px")
+                ),
+                box(
+                  width = 4, status = "warning",
+                  title = "Intervention Type",
+                  plotOutput("interventionPlot", height = "200px")
+                )
+              ),
+              fluidRow(
+                box(width = 6, title = "Kaplan-Meier Survival Curve", status = "success", solidHeader = TRUE,
+                    plotOutput("kmPlot")),
+                box(width = 6, title = "Age vs Time", status = "danger",
+                    plotOutput("ageTimePlot"))
+              )
+      ),
+      tabItem(tabName = "patients",
+              h2("Patient Data"),
+              DT::dataTableOutput("patientTable")
+      )
+    )
+  )
+)
+
+# ---- SERVER ----
+server <- function(input, output, session) {
+  
+  # Reactive filtered data based on sidebar inputs
+  filtered_data <- reactive({
+    data %>%
+      filter(age >= input$ageRange[1],
+             age <= input$ageRange[2],
+             sex %in% input$genderFilter)
+  })
+  
+  # Patients Gauge
+  output$patientGauge <- renderGauge({
+    req(filtered_data())
+    total <- nrow(filtered_data())
+    gauge(total, min = 0, max = nrow(data), # Max should be total patients
+          label = paste0("Patients: ", total),
+          gaugeSectors(success = c(300, 500), warning = c(100, 299), danger = c(0, 99)))
+  })
+  
+  # Gender Distribution Plot (Half Donut)
+  output$genderPlot <- renderPlot({
+    req(nrow(filtered_data()) > 0)
+    gender_data <- filtered_data() %>%
+      count(sex) %>%
+      mutate(
+        sex = factor(sex, levels = c(1, 2), labels = c("Male", "Female")),
+        perc = n / sum(n),
+        ymax = cumsum(perc),
+        ymin = c(0, head(ymax, n = -1)),
+        label = paste0(sex, "\n", n, " (", scales::percent(perc, accuracy = 1), ")")
+      )
+    
+    ggplot(gender_data, aes(ymax = ymax, ymin = ymin, xmax = 2, xmin = 1, fill = sex)) +
+      geom_rect(color = "white") +
+      coord_polar(theta = "y", start = pi, direction = -1) +
+      xlim(c(0.5, 2)) +
+      theme_void() +
+      scale_fill_manual(values = c("Male" = "skyblue", "Female" = "salmon")) +
+      geom_text(aes(x = 1.5, y = (ymin + ymax) / 2, label = label), color = "black", size = 5) +
+      theme(legend.position = "none")
+  }, bg="transparent") # Make background transparent
+  
+  # Intervention Plot (Half Donut)
+  output$interventionPlot <- renderPlot({
+    req(nrow(filtered_data()) > 0)
+    intervention_data <- filtered_data() %>%
+      count(intervention) %>%
+      mutate(
+        perc = n / sum(n),
+        ymax = cumsum(perc),
+        ymin = c(0, head(ymax, n = -1)),
+        label = paste0(intervention, "\n", n, " (", scales::percent(perc, accuracy = 1), ")")
+      )
+    
+    ggplot(intervention_data, aes(ymax = ymax, ymin = ymin, xmax = 2, xmin = 1, fill = intervention)) +
+      geom_rect(color = "white") +
+      coord_polar(theta = "y", start = pi, direction = -1) +
+      xlim(c(0.5, 2)) +
+      theme_void() +
+      scale_fill_manual(values = c("Standard_Care" = "skyblue", "Drug" = "salmon")) +
+      geom_text(aes(x = 1.5, y = (ymin + ymax) / 2, label = label), color = "black", size = 5) +
+      theme(legend.position = "none")
+  }, bg="transparent") # Make background transparent
+  
+  # Kaplan-Meier Plot
+  output$kmPlot <- renderPlot({
+    df <- filtered_data()
+    
+    # Ensure there's enough data to plot
+    if (nrow(df) > 1 && length(unique(df$intervention)) > 0) {
+      
+      # Drop unused factor levels from the filtered data. This is still important.
+      df$intervention <- droplevels(df$intervention)
+      
+      # --- THIS IS THE FIX ---
+      # Create the survival fit object by putting Surv() directly in the formula.
+      # This is a more robust way to ensure survfit only sees the filtered 'df'.
+      fit <- survfit(Surv(time, status_new) ~ intervention, data = df)
+      
+      # ggsurvplot will now automatically use the correct labels from the 'fit' object
+      ggsurvplot(
+        fit,
+        data = df, # Pass the filtered data for the risk table
+        pval = TRUE,
+        conf.int = TRUE,
+        risk.table = TRUE,
+        legend.title = "Intervention Type",
+        ggtheme = theme_minimal(base_size = 14),
+        risk.table.y.text = FALSE, # Cleaner risk table
+        tables.theme = theme_cleantable()
+      )
+    } else {
+      # Display a message if there's not enough data
+      ggplot() +
+        annotate("text", x = 1, y = 1, size = 6,
+                 label = "Not enough data for the selected filters to generate a survival curve.") +
+        theme_void()
+    }
+  })
+  
+  output$ageTimePlot <- renderPlot({
+    ggplot(filtered_data(), aes(x = age, y = time, color = intervention)) +
+      geom_point() +
+      theme_minimal() +
+      labs(x = "Age", y = "Survival Time (days)")
+  })
+  
+  # Patients Table
+  output$patientTable <- DT::renderDataTable({
+    DT::datatable(filtered_data(), options = list(pageLength = 10, scrollX = TRUE))
+  })
+}
+
+# ---- Run App ----
+shinyApp(ui, server)
